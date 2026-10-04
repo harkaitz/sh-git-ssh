@@ -1,0 +1,172 @@
+#!/bin/sh -e
+##:
+#h: Usage: git-ssh [-s SECT][-S][-r SSH][-v] COMMAND OPTS...
+#h:
+#h: Manage a git repository in a remote OpenSSH machine.
+#h:
+#h: ... i|install       : Install GIT.
+#h: ... l|list          : List repositories.
+#h: ... n|new [NAME]    : Create repository with name.
+#h: ... d|del NAME      : Delete repository.
+#h: ... r|remote [NAME] : Set origin remote.
+#h: ... o|other  [NAME] : Set other remote.
+#h: ... c|clone NAME    : Clone project.
+#h: ... u|url [NAME]    : Calculate URL.
+#h:
+#h: Run `git-ssh show` for a list of environment variables.
+##:
+git_ssh() {
+    local OPTIND optopt
+    
+    # Parse command line arguments.
+    while getopts "s:r:" optopt; do
+        case $optopt in
+            s)  GIT_SSH_SECT="${OPTARG}";;
+            S)  GIT_SSH_SECT="pub";;
+            r)  GIT_SSH="${OPTARG}";;
+            v)  VERBOSE="y";;
+            \?) return 1;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+
+    # Calculate variables.
+    local r="${GIT_SSH_REPO}"
+    case "${r}" in
+        *:)  GIT_SSH_HOST="${r%%:*}"  GIT_SSH_PATH='/git';;
+        :*)  GIT_SSH_HOST="localhost" GIT_SSH_PATH="${r#*:}";;
+        *:*) GIT_SSH_HOST="${r%%:*}"  GIT_SSH_PATH="${r#*:}";;
+        *)   GIT_SSH_HOST="localhost" GIT_SSH_PATH="${r}";;
+    esac
+    : ${GIT_SSH_SECT:=priv} ${GIT_WORKDIR:=${HOME}/Projects}
+    
+    # Show variables.
+    if test @"${1:-show}" = @"show"; then
+        cat <<-EOF
+	GIT_SSH_REPO : $GIT_SSH_REPO
+	GIT_SSH_SECT : $GIT_SSH_SECT
+	'-> GIT_SSH_HOST : $GIT_SSH_HOST
+	'-> GIT_SSH_PATH : $GIT_SSH_PATH
+	'-> Final path   : $GIT_SSH_PATH/$GIT_SSH_SECT
+	GIT_WORKDIR  : $GIT_WORKDIR
+	EOF
+        return 0
+    fi
+    
+    # Commands.
+    local cmd="$1"
+    shift
+    case "$cmd" in
+        i|install) git_ssh_install  ;;
+        l|list)    git_ssh_list     ;;
+        n|new)     git_ssh_new "$@" ;;
+        d|del)     git_ssh_del "$@" ;;
+        r|remote)  git_ssh_remote "$1" ;;
+        o|other)   git_ssh_remote "$1" other ;;
+        c|clone)   git_ssh_clone  "$@" ;;
+        u|url)     git_ssh_url    "$@" ;;
+        *)         error "Invalid argument: $cmd"; return 1;;
+    esac   
+}
+# --------------------------------------------------------------------
+git_ssh_install() {
+    git_ssh_run '
+        info "Installing git ..."
+        if test -f /usr/bin/git;then
+            true
+        elif test -f /usr/bin/yum;then
+            sudo yum -y install git
+        elif test -f /usr/sbin/pkg;then
+            sudo pkg install --yes git
+        else
+            error "Please install GIT manually."
+            exit 1
+        fi
+        info "Creating $d ($u) ..."
+        sudo mkdir -p "$d"
+        sudo chown -R "$u:$u" "$d"
+        '
+}
+git_ssh_list() {
+    git_ssh_run '
+        for n in $(test ! -d "$d" || find "$d" -type d -name "*.git"); do
+            basename "$n" .git
+        done
+    '
+}
+git_ssh_new() {
+    local n="${1:-`pwd | xargs basename`}"
+    if test ! -n "$n"; then
+        error "Please specify a repository name."
+        return 1
+    fi
+    git_ssh_run "n='$n'"'
+    if test -d "${d}/${n}.git";then
+        info "Directory ${d}/${n}.git exists."
+        exit 0
+    fi
+    vrun git init --bare "${d}/${n}.git"
+    '
+}
+git_ssh_del() {
+    if test ! -n "$1"; then
+        error "Please specify a repository name."
+        return 1
+    fi
+    git_ssh_run "n='$1'"'
+    if test ! -d "${d}/${n}.git";then exit 0; fi
+    vrun mv "${d}/${n}.git" "${d}/${n}.git.`date +%Y%m%d`"
+    '
+}
+git_ssh_remote() {
+    local n="${1:-`pwd | xargs basename`}"
+    if test ! -n "$n"; then
+        error "Please specify a repository name."
+        return 1
+    elif test ! -e ".git"; then
+        error "Not a git repository."
+        return 1
+    fi
+    local u="$GIT_SSH_HOST:$GIT_SSH_PATH/$GIT_SSH_SECT/$n.git"
+    vrun git remote add "${2:-origin}" "$u"
+}
+git_ssh_clone() {
+    if test ! -n "$1"; then
+        error "Please specify a repository name."
+        return 1
+    fi
+    local u="$GIT_SSH_HOST:$GIT_SSH_PATH/$GIT_SSH_SECT/$1.git"
+    local d="$GIT_WORKDIR/$1"
+    vrun git clone "$u" "$d"
+}
+git_ssh_url() (
+    echo "$GIT_SSH_HOST:$GIT_SSH_PATH/$GIT_SSH_SECT/${1:-`pwd | xargs basename`}.git"
+)
+# --------------------------------------------------------------------
+git_ssh_run() {
+    local cmd="
+        set -e
+        u=\`whoami\`
+        d=$GIT_SSH_PATH/$GIT_SSH_SECT
+        error() { echo \"\`uname -n\`: ERR: \$*\" >&2; }
+        info()  { echo \"\`uname -n\`: \$*\"      >&2; }
+        vrun()  { info \"\$*\"; \"\$@\"; }
+        $*
+    "
+    if test @"$GIT_SSH_HOST" = @"localhost"; then
+        sh -c "$cmd"
+    else
+        ssh "$GIT_SSH_HOST" "$cmd"
+    fi
+}
+info()  { echo "$*" >&2; }
+error() { echo "ERR: $*" >&2; }
+vrun()  { info "$*"; "$@"; }
+# --------------------------------------------------------------------
+if test @"${0##*/}" = @"git-ssh"; then
+    case "${1}" in
+        ''|-h|--help) sed -n 's/^ *#h: \{0,1\}//p' "$0";;
+        *)            git_ssh "$@";;
+    esac
+    exit 0
+fi
